@@ -7,12 +7,13 @@ use i3ipc::I3Connection;
 /// `(workspace_name, output_name)` for every current workspace, or `None` if
 /// i3 is unreachable.
 pub fn workspaces_by_output() -> Option<Vec<(String, String)>> {
-    let mut conn = I3Connection::connect().ok()?;
-    let ws = conn.get_workspaces().ok()?;
+    let mut connection = I3Connection::connect().ok()?;
+    let workspaces_reply = connection.get_workspaces().ok()?;
     Some(
-        ws.workspaces
+        workspaces_reply
+            .workspaces
             .into_iter()
-            .map(|w| (w.name, w.output))
+            .map(|workspace| (workspace.name, workspace.output))
             .collect(),
     )
 }
@@ -20,12 +21,15 @@ pub fn workspaces_by_output() -> Option<Vec<(String, String)>> {
 /// Whether i3 currently reports `name` as an active output. Used to wait for i3
 /// to catch up with an xrandr change before moving workspaces onto it.
 pub fn output_active(name: &str) -> bool {
-    let mut conn = match I3Connection::connect() {
-        Ok(c) => c,
+    let mut connection = match I3Connection::connect() {
+        Ok(connection) => connection,
         Err(_) => return false,
     };
-    match conn.get_outputs() {
-        Ok(outs) => outs.outputs.iter().any(|o| o.name == name && o.active),
+    match connection.get_outputs() {
+        Ok(outputs_reply) => outputs_reply
+            .outputs
+            .iter()
+            .any(|output| output.name == name && output.active),
         Err(_) => false,
     }
 }
@@ -37,41 +41,42 @@ pub fn move_workspaces_to_output(workspaces: &[String], output: &str) {
     if workspaces.is_empty() {
         return;
     }
-    let mut conn = match I3Connection::connect() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("i3-awm: cannot connect to i3 to move workspaces: {e}");
+    let mut connection = match I3Connection::connect() {
+        Ok(connection) => connection,
+        Err(error) => {
+            eprintln!("i3-awm: cannot connect to i3 to move workspaces: {error}");
             return;
         }
     };
 
-    let focused = conn.get_workspaces().ok().and_then(|w| {
-        w.workspaces
+    let focused_workspace = connection.get_workspaces().ok().and_then(|reply| {
+        reply
+            .workspaces
             .into_iter()
-            .find(|x| x.focused)
-            .map(|x| x.name)
+            .find(|workspace| workspace.focused)
+            .map(|workspace| workspace.name)
     });
 
-    for ws in workspaces {
-        let cmd = format!(
-            "workspace --no-auto-back-and-forth \"{ws}\"; move workspace to output \"{output}\"",
-            ws = escape(ws),
+    for workspace in workspaces {
+        let command = format!(
+            "workspace --no-auto-back-and-forth \"{workspace}\"; move workspace to output \"{output}\"",
+            workspace = escape(workspace),
             output = escape(output),
         );
-        if let Err(e) = conn.run_command(&cmd) {
-            eprintln!("i3-awm: failed to move workspace {ws} to {output}: {e}");
+        if let Err(error) = connection.run_command(&command) {
+            eprintln!("i3-awm: failed to move workspace {workspace} to {output}: {error}");
         }
     }
 
-    if let Some(f) = focused {
-        let _ = conn.run_command(&format!(
+    if let Some(name) = focused_workspace {
+        let _ = connection.run_command(&format!(
             "workspace --no-auto-back-and-forth \"{}\"",
-            escape(&f)
+            escape(&name)
         ));
     }
 }
 
 /// Escape characters that would break out of an i3 double-quoted string.
-fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+fn escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('"', "\\\"")
 }

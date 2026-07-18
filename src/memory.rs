@@ -34,9 +34,9 @@ impl Memory {
     pub fn load() -> Self {
         let path = state_path();
         match std::fs::read_to_string(&path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_else(|e| {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|error| {
                 eprintln!(
-                    "i3-awm: failed to parse {}: {e}; starting with empty memory",
+                    "i3-awm: failed to parse {}: {error}; starting with empty memory",
                     path.display()
                 );
                 Memory::default()
@@ -48,16 +48,16 @@ impl Memory {
     /// Best-effort write to disk. Never panics; logs on failure.
     pub fn save(&self) {
         let path = state_path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
+        if let Some(directory) = path.parent() {
+            let _ = std::fs::create_dir_all(directory);
         }
         match serde_json::to_string_pretty(self) {
-            Ok(json) => {
-                if let Err(e) = std::fs::write(&path, json) {
-                    eprintln!("i3-awm: failed to write {}: {e}", path.display());
+            Ok(serialized) => {
+                if let Err(error) = std::fs::write(&path, serialized) {
+                    eprintln!("i3-awm: failed to write {}: {error}", path.display());
                 }
             }
-            Err(e) => eprintln!("i3-awm: failed to serialize state: {e}"),
+            Err(error) => eprintln!("i3-awm: failed to serialize state: {error}"),
         }
     }
 
@@ -72,14 +72,14 @@ impl Memory {
 
 /// `$XDG_STATE_HOME/i3-awm/state.json`, falling back to `~/.local/state`.
 fn state_path() -> PathBuf {
-    let base = std::env::var_os("XDG_STATE_HOME")
+    let base_directory = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+        .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME")
+            let home_directory = std::env::var_os("HOME")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("."));
-            home.join(".local").join("state")
+            home_directory.join(".local").join("state")
         });
-    base.join("i3-awm").join("state.json")
+    base_directory.join("i3-awm").join("state.json")
 }

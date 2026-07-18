@@ -5,8 +5,8 @@
 //!   * the i3 tracker keeps each connected output's workspace list current, so
 //!     the "which workspaces were here" info survives i3's automatic re-homing
 //!     at disconnect time;
-//!   * the RandR watcher snapshots geometry on every layout change and restores
-//!     an output the moment it reconnects.
+//!   * the RandR watcher snapshots geometry on every layout change, disables an
+//!     output when it disconnects, and restores it the moment it reconnects.
 
 mod i3;
 mod memory;
@@ -22,28 +22,29 @@ use std::time::Duration;
 type SharedMemory = Arc<Mutex<Memory>>;
 
 fn main() {
-    let mem: SharedMemory = Arc::new(Mutex::new(Memory::load()));
+    let shared_memory: SharedMemory = Arc::new(Mutex::new(Memory::load()));
 
     // Baseline: record the current live layout without restoring anything, and
     // seed the set of connected outputs so nothing counts as "newly connected"
     // on the first reconcile.
-    let mut prev_connected: HashSet<String> = xrandr::connected_names().into_iter().collect();
-    snapshot(&mem);
-    update_workspaces(&mem, &prev_connected);
-    mem.lock().unwrap().save();
+    let mut previously_connected: HashSet<String> =
+        xrandr::connected_names().into_iter().collect();
+    snapshot(&shared_memory);
+    update_workspaces(&shared_memory, &previously_connected);
+    shared_memory.lock().unwrap().save();
     println!(
         "i3-awm: started; tracking {} connected output(s)",
-        prev_connected.len()
+        previously_connected.len()
     );
 
     // Thread A: keep workspace lists up to date from i3 workspace events.
     {
-        let mem = Arc::clone(&mem);
-        thread::spawn(move || track_i3(mem));
+        let shared_memory = Arc::clone(&shared_memory);
+        thread::spawn(move || track_i3(shared_memory));
     }
 
     // Thread B (this thread): react to monitor connect/disconnect.
-    randr_events::watch(|| reconcile(&mem, &mut prev_connected));
+    randr_events::watch(|| reconcile(&shared_memory, &mut previously_connected));
 
     // watch() only returns on a fatal X error.
     eprintln!("i3-awm: RandR watcher exited; shutting down");
@@ -51,19 +52,19 @@ fn main() {
 
 /// Copy every active output's current resolution/position/primary into memory,
 /// so the last-good geometry is always captured before a future disconnect.
-fn snapshot(mem: &SharedMemory) {
+fn snapshot(shared_memory: &SharedMemory) {
     let outputs = xrandr::query();
-    let mut m = mem.lock().unwrap();
-    for o in &outputs {
-        if o.connected && o.active {
-            let e = m.entry(&o.name);
-            if let Some(res) = o.resolution {
-                e.resolution = Some(res);
+    let mut memory = shared_memory.lock().unwrap();
+    for output in &outputs {
+        if output.connected && output.active {
+            let output_state = memory.entry(&output.name);
+            if let Some(resolution) = output.resolution {
+                output_state.resolution = Some(resolution);
             }
-            if let Some(pos) = o.position {
-                e.position = Some(pos);
+            if let Some(position) = output.position {
+                output_state.position = Some(position);
             }
-            e.primary = o.primary;
+            output_state.primary = output.primary;
         }
     }
 }
@@ -71,132 +72,155 @@ fn snapshot(mem: &SharedMemory) {
 /// Refresh workspace lists for currently connected outputs only. Outputs absent
 /// from i3's report are left untouched, preserving the last-good list for a
 /// monitor that just disconnected (whose workspaces i3 has re-homed elsewhere).
-fn update_workspaces(mem: &SharedMemory, connected: &HashSet<String>) {
-    let mapping = match i3::workspaces_by_output() {
-        Some(m) => m,
+fn update_workspaces(shared_memory: &SharedMemory, connected_outputs: &HashSet<String>) {
+    let workspace_mapping = match i3::workspaces_by_output() {
+        Some(mapping) => mapping,
         None => return,
     };
-    let mut by_output: std::collections::HashMap<String, Vec<String>> = Default::default();
-    for (ws, output) in mapping {
-        by_output.entry(output).or_default().push(ws);
+    let mut workspaces_per_output: std::collections::HashMap<String, Vec<String>> =
+        Default::default();
+    for (workspace_name, output_name) in workspace_mapping {
+        workspaces_per_output
+            .entry(output_name)
+            .or_default()
+            .push(workspace_name);
     }
-    let mut m = mem.lock().unwrap();
-    for (output, list) in by_output {
-        if connected.contains(&output) {
-            m.entry(&output).workspaces = list;
+    let mut memory = shared_memory.lock().unwrap();
+    for (output_name, workspace_list) in workspaces_per_output {
+        if connected_outputs.contains(&output_name) {
+            memory.entry(&output_name).workspaces = workspace_list;
         }
     }
 }
 
 /// Thread A body: subscribe to i3 workspace events and update memory on each.
 /// Reconnects with a short backoff if the i3 socket drops (e.g. i3 restart).
-fn track_i3(mem: SharedMemory) {
+fn track_i3(shared_memory: SharedMemory) {
     use i3ipc::event::Event;
     use i3ipc::{I3EventListener, Subscription};
 
     loop {
         match I3EventListener::connect() {
             Ok(mut listener) => {
-                if let Err(e) = listener.subscribe(&[Subscription::Workspace]) {
-                    eprintln!("i3-awm: failed to subscribe to i3 events: {e}");
+                if let Err(error) = listener.subscribe(&[Subscription::Workspace]) {
+                    eprintln!("i3-awm: failed to subscribe to i3 events: {error}");
                 } else {
                     for event in listener.listen() {
                         match event {
                             Ok(Event::WorkspaceEvent(_)) => {
-                                let connected: HashSet<String> =
+                                let connected_outputs: HashSet<String> =
                                     xrandr::connected_names().into_iter().collect();
-                                update_workspaces(&mem, &connected);
-                                mem.lock().unwrap().save();
+                                update_workspaces(&shared_memory, &connected_outputs);
+                                shared_memory.lock().unwrap().save();
                             }
                             Ok(_) => {}
-                            Err(e) => {
-                                eprintln!("i3-awm: i3 event error: {e}");
+                            Err(error) => {
+                                eprintln!("i3-awm: i3 event error: {error}");
                                 break;
                             }
                         }
                     }
                 }
             }
-            Err(e) => eprintln!("i3-awm: cannot connect to i3 event socket: {e}"),
+            Err(error) => eprintln!("i3-awm: cannot connect to i3 event socket: {error}"),
         }
         thread::sleep(Duration::from_secs(2));
     }
 }
 
-/// Thread B body: on every RandR change, snapshot geometry, then restore any
-/// output that just became connected.
-fn reconcile(mem: &SharedMemory, prev_connected: &mut HashSet<String>) {
+/// Thread B body: on every RandR change, snapshot geometry, disable any output
+/// that just disconnected, and restore any output that just became connected.
+fn reconcile(shared_memory: &SharedMemory, previously_connected: &mut HashSet<String>) {
     let outputs = xrandr::query();
-    let connected_now: HashSet<String> = outputs
+    let currently_connected: HashSet<String> = outputs
         .iter()
-        .filter(|o| o.connected)
-        .map(|o| o.name.clone())
+        .filter(|output| output.connected)
+        .map(|output| output.name.clone())
         .collect();
 
-    snapshot(mem);
-    update_workspaces(mem, &connected_now);
+    snapshot(shared_memory);
+    update_workspaces(shared_memory, &currently_connected);
 
-    let newly: Vec<String> = connected_now.difference(prev_connected).cloned().collect();
-    for name in &newly {
-        println!("i3-awm: output {name} connected; restoring");
-        restore_output(mem, &outputs, name);
-    }
-    for name in prev_connected.difference(&connected_now) {
-        println!("i3-awm: output {name} disconnected; state remembered");
+    let newly_connected: Vec<String> = currently_connected
+        .difference(previously_connected)
+        .cloned()
+        .collect();
+    for output_name in &newly_connected {
+        println!("i3-awm: output {output_name} connected; restoring");
+        restore_output(shared_memory, &outputs, output_name);
     }
 
-    *prev_connected = connected_now;
-    mem.lock().unwrap().save();
+    let newly_disconnected: Vec<String> = previously_connected
+        .difference(&currently_connected)
+        .cloned()
+        .collect();
+    for output_name in &newly_disconnected {
+        println!("i3-awm: output {output_name} disconnected; disabling and remembering state");
+        disable_output(output_name);
+    }
+
+    *previously_connected = currently_connected;
+    shared_memory.lock().unwrap().save();
+}
+
+/// Turn a disconnected output off in xrandr. When a monitor is unplugged the X
+/// server often leaves its CRTC enabled at the old mode (a "ghost" output that
+/// still occupies desktop space); explicitly disabling it reclaims that space.
+fn disable_output(name: &str) {
+    xrandr::apply(&["--output".into(), name.into(), "--off".into()]);
 }
 
 /// Apply resolution/position/primary for a freshly connected output, wait for
 /// i3 to see it, then move its remembered workspaces back onto it.
-fn restore_output(mem: &SharedMemory, outputs: &[xrandr::OutputInfo], name: &str) {
-    let info = outputs.iter().find(|o| o.name == name);
+fn restore_output(shared_memory: &SharedMemory, outputs: &[xrandr::OutputInfo], name: &str) {
+    let output_info = outputs.iter().find(|output| output.name == name);
 
-    let (stored, workspaces) = {
-        let m = mem.lock().unwrap();
-        let s = m.get(name).cloned();
-        let ws = s.as_ref().map(|s| s.workspaces.clone()).unwrap_or_default();
-        (s, ws)
+    let (stored_state, workspaces) = {
+        let memory = shared_memory.lock().unwrap();
+        let stored_state = memory.get(name).cloned();
+        let workspaces = stored_state
+            .as_ref()
+            .map(|state| state.workspaces.clone())
+            .unwrap_or_default();
+        (stored_state, workspaces)
     };
 
-    let mut args: Vec<String> = vec!["--output".into(), name.into()];
+    let mut arguments: Vec<String> = vec!["--output".into(), name.into()];
 
     // Mode: stored resolution, else the monitor's preferred (native) mode.
-    let mode = stored
+    let mode = stored_state
         .as_ref()
-        .and_then(|s| s.resolution)
-        .or_else(|| info.and_then(|i| i.preferred));
+        .and_then(|state| state.resolution)
+        .or_else(|| output_info.and_then(|info| info.preferred));
     match mode {
-        Some((w, h)) => {
-            args.push("--mode".into());
-            args.push(format!("{w}x{h}"));
+        Some((width, height)) => {
+            arguments.push("--mode".into());
+            arguments.push(format!("{width}x{height}"));
         }
-        None => args.push("--auto".into()),
+        None => arguments.push("--auto".into()),
     }
 
     // Position: stored absolute position, else right of the current primary.
-    match stored.as_ref().and_then(|s| s.position) {
-        Some((x, y)) => {
-            args.push("--pos".into());
-            args.push(format!("{x}x{y}"));
+    match stored_state.as_ref().and_then(|state| state.position) {
+        Some((x_offset, y_offset)) => {
+            arguments.push("--pos".into());
+            arguments.push(format!("{x_offset}x{y_offset}"));
         }
         None => {
-            if let Some(primary) = current_primary(outputs)
-                && primary != name
+            if let Some(primary_name) = current_primary(outputs)
+                && primary_name != name
             {
-                args.push("--right-of".into());
-                args.push(primary);
+                arguments.push("--right-of".into());
+                arguments.push(primary_name);
             }
         }
     }
 
-    if stored.as_ref().is_some_and(|s| s.primary) {
-        args.push("--primary".into());
+    if stored_state.as_ref().is_some_and(|state| state.primary) {
+        arguments.push("--primary".into());
     }
 
-    if !xrandr::apply(&args) {
+    if !xrandr::apply(&arguments) {
         return;
     }
 
@@ -216,6 +240,6 @@ fn restore_output(mem: &SharedMemory, outputs: &[xrandr::OutputInfo], name: &str
 fn current_primary(outputs: &[xrandr::OutputInfo]) -> Option<String> {
     outputs
         .iter()
-        .find(|o| o.primary && o.active)
-        .map(|o| o.name.clone())
+        .find(|output| output.primary && output.active)
+        .map(|output| output.name.clone())
 }
