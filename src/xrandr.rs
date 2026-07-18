@@ -33,15 +33,6 @@ pub fn query() -> Vec<OutputInfo> {
     parse(&String::from_utf8_lossy(&command_output.stdout))
 }
 
-/// Names of all currently connected outputs.
-pub fn connected_names() -> Vec<String> {
-    query()
-        .into_iter()
-        .filter(|output| output.connected)
-        .map(|output| output.name)
-        .collect()
-}
-
 /// Parse the textual output of `xrandr --query`.
 pub fn parse(text: &str) -> Vec<OutputInfo> {
     let mut outputs: Vec<OutputInfo> = Vec::new();

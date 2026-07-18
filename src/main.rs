@@ -7,6 +7,11 @@
 //!     at disconnect time;
 //!   * the RandR watcher snapshots geometry on every layout change, disables an
 //!     output when it disconnects, and restores it the moment it reconnects.
+//!
+//! `xrandr --query` is surprisingly expensive on some systems (hundreds of ms),
+//! so it is called at most once per reconcile: the RandR watcher queries once
+//! and shares the resulting connected-output set with the i3 tracker, which
+//! therefore never shells out to xrandr itself.
 
 mod i3;
 mod memory;
@@ -20,6 +25,10 @@ use std::thread;
 use std::time::Duration;
 
 type SharedMemory = Arc<Mutex<Memory>>;
+/// The set of currently connected output names, maintained by the RandR watcher
+/// (Thread B) and read by the i3 tracker (Thread A) so the latter never has to
+/// run its own `xrandr --query`.
+type SharedConnected = Arc<Mutex<HashSet<String>>>;
 
 fn main() {
     let shared_memory: SharedMemory = Arc::new(Mutex::new(Memory::load()));
@@ -27,9 +36,15 @@ fn main() {
     // Baseline: record the current live layout without restoring anything, and
     // seed the set of connected outputs so nothing counts as "newly connected"
     // on the first reconcile.
-    let mut previously_connected: HashSet<String> =
-        xrandr::connected_names().into_iter().collect();
-    snapshot(&shared_memory);
+    let outputs = xrandr::query();
+    let mut previously_connected: HashSet<String> = outputs
+        .iter()
+        .filter(|output| output.connected)
+        .map(|output| output.name.clone())
+        .collect();
+    let connected_cache: SharedConnected =
+        Arc::new(Mutex::new(previously_connected.clone()));
+    snapshot(&shared_memory, &outputs);
     update_workspaces(&shared_memory, &previously_connected);
     shared_memory.lock().unwrap().save();
     println!(
@@ -40,11 +55,12 @@ fn main() {
     // Thread A: keep workspace lists up to date from i3 workspace events.
     {
         let shared_memory = Arc::clone(&shared_memory);
-        thread::spawn(move || track_i3(shared_memory));
+        let connected_cache = Arc::clone(&connected_cache);
+        thread::spawn(move || track_i3(shared_memory, connected_cache));
     }
 
     // Thread B (this thread): react to monitor connect/disconnect.
-    randr_events::watch(|| reconcile(&shared_memory, &mut previously_connected));
+    randr_events::watch(|| reconcile(&shared_memory, &connected_cache, &mut previously_connected));
 
     // watch() only returns on a fatal X error.
     eprintln!("i3-awm: RandR watcher exited; shutting down");
@@ -52,10 +68,10 @@ fn main() {
 
 /// Copy every active output's current resolution/position/primary into memory,
 /// so the last-good geometry is always captured before a future disconnect.
-fn snapshot(shared_memory: &SharedMemory) {
-    let outputs = xrandr::query();
+/// Takes an already-queried output list to avoid a redundant `xrandr --query`.
+fn snapshot(shared_memory: &SharedMemory, outputs: &[xrandr::OutputInfo]) {
     let mut memory = shared_memory.lock().unwrap();
-    for output in &outputs {
+    for output in outputs {
         if output.connected && output.active {
             let output_state = memory.entry(&output.name);
             if let Some(resolution) = output.resolution {
@@ -95,7 +111,11 @@ fn update_workspaces(shared_memory: &SharedMemory, connected_outputs: &HashSet<S
 
 /// Thread A body: subscribe to i3 workspace events and update memory on each.
 /// Reconnects with a short backoff if the i3 socket drops (e.g. i3 restart).
-fn track_i3(shared_memory: SharedMemory) {
+///
+/// Reads the connected-output set from the shared cache rather than running
+/// `xrandr --query`, which would otherwise add hundreds of milliseconds to the
+/// handling of every single workspace event.
+fn track_i3(shared_memory: SharedMemory, connected_cache: SharedConnected) {
     use i3ipc::event::Event;
     use i3ipc::{I3EventListener, Subscription};
 
@@ -108,8 +128,7 @@ fn track_i3(shared_memory: SharedMemory) {
                     for event in listener.listen() {
                         match event {
                             Ok(Event::WorkspaceEvent(_)) => {
-                                let connected_outputs: HashSet<String> =
-                                    xrandr::connected_names().into_iter().collect();
+                                let connected_outputs = connected_cache.lock().unwrap().clone();
                                 update_workspaces(&shared_memory, &connected_outputs);
                                 shared_memory.lock().unwrap().save();
                             }
@@ -130,15 +149,21 @@ fn track_i3(shared_memory: SharedMemory) {
 
 /// Thread B body: on every RandR change, snapshot geometry, disable any output
 /// that just disconnected, and restore any output that just became connected.
-fn reconcile(shared_memory: &SharedMemory, previously_connected: &mut HashSet<String>) {
+fn reconcile(
+    shared_memory: &SharedMemory,
+    connected_cache: &SharedConnected,
+    previously_connected: &mut HashSet<String>,
+) {
     let outputs = xrandr::query();
     let currently_connected: HashSet<String> = outputs
         .iter()
         .filter(|output| output.connected)
         .map(|output| output.name.clone())
         .collect();
+    // Publish the connected set so Thread A does not need to query xrandr.
+    *connected_cache.lock().unwrap() = currently_connected.clone();
 
-    snapshot(shared_memory);
+    snapshot(shared_memory, &outputs);
     update_workspaces(shared_memory, &currently_connected);
 
     let newly_connected: Vec<String> = currently_connected
