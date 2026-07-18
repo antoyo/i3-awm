@@ -47,8 +47,7 @@ fn main() {
         .filter(|output| output.connected)
         .map(|output| output.name.clone())
         .collect();
-    let connected_cache: SharedConnected =
-        Arc::new(Mutex::new(previously_connected.clone()));
+    let connected_cache: SharedConnected = Arc::new(Mutex::new(previously_connected.clone()));
     snapshot(&shared_memory, &outputs);
     update_workspaces(&shared_memory, &previously_connected);
     shared_memory.lock().unwrap().save();
@@ -65,7 +64,14 @@ fn main() {
     }
 
     // Thread B (this thread): react to monitor connect/disconnect.
-    randr.watch(|randr| reconcile(randr, &shared_memory, &connected_cache, &mut previously_connected));
+    randr.watch(|randr| {
+        reconcile(
+            randr,
+            &shared_memory,
+            &connected_cache,
+            &mut previously_connected,
+        )
+    });
 
     // watch() only returns on a fatal X error.
     eprintln!("i3-awm: RandR watcher exited; shutting down");

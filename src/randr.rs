@@ -111,7 +111,10 @@ impl Randr {
         let output_info_cookies: Vec<_> = resources
             .outputs
             .iter()
-            .map(|&output| self.connection.randr_get_output_info(output, config_timestamp))
+            .map(|&output| {
+                self.connection
+                    .randr_get_output_info(output, config_timestamp)
+            })
             .collect();
 
         let mut outputs = Vec::with_capacity(resources.outputs.len());
