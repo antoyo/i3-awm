@@ -15,7 +15,7 @@
 
 mod i3;
 mod memory;
-mod randr_events;
+mod randr;
 mod xrandr;
 
 use memory::Memory;
@@ -31,12 +31,17 @@ type SharedMemory = Arc<Mutex<Memory>>;
 type SharedConnected = Arc<Mutex<HashSet<String>>>;
 
 fn main() {
+    let randr = match randr::Randr::connect() {
+        Some(randr) => randr,
+        None => return,
+    };
+
     let shared_memory: SharedMemory = Arc::new(Mutex::new(Memory::load()));
 
     // Baseline: record the current live layout without restoring anything, and
     // seed the set of connected outputs so nothing counts as "newly connected"
     // on the first reconcile.
-    let outputs = xrandr::query();
+    let outputs = randr.query();
     let mut previously_connected: HashSet<String> = outputs
         .iter()
         .filter(|output| output.connected)
@@ -60,7 +65,7 @@ fn main() {
     }
 
     // Thread B (this thread): react to monitor connect/disconnect.
-    randr_events::watch(|| reconcile(&shared_memory, &connected_cache, &mut previously_connected));
+    randr.watch(|randr| reconcile(randr, &shared_memory, &connected_cache, &mut previously_connected));
 
     // watch() only returns on a fatal X error.
     eprintln!("i3-awm: RandR watcher exited; shutting down");
@@ -69,7 +74,7 @@ fn main() {
 /// Copy every active output's current resolution/position/primary into memory,
 /// so the last-good geometry is always captured before a future disconnect.
 /// Takes an already-queried output list to avoid a redundant `xrandr --query`.
-fn snapshot(shared_memory: &SharedMemory, outputs: &[xrandr::OutputInfo]) {
+fn snapshot(shared_memory: &SharedMemory, outputs: &[randr::OutputInfo]) {
     let mut memory = shared_memory.lock().unwrap();
     for output in outputs {
         if output.connected && output.active {
@@ -150,11 +155,12 @@ fn track_i3(shared_memory: SharedMemory, connected_cache: SharedConnected) {
 /// Thread B body: on every RandR change, snapshot geometry, disable any output
 /// that just disconnected, and restore any output that just became connected.
 fn reconcile(
+    randr: &randr::Randr,
     shared_memory: &SharedMemory,
     connected_cache: &SharedConnected,
     previously_connected: &mut HashSet<String>,
 ) {
-    let outputs = xrandr::query();
+    let outputs = randr.query();
     let currently_connected: HashSet<String> = outputs
         .iter()
         .filter(|output| output.connected)
@@ -197,7 +203,7 @@ fn disable_output(name: &str) {
 
 /// Apply resolution/position/primary for a freshly connected output, wait for
 /// i3 to see it, then move its remembered workspaces back onto it.
-fn restore_output(shared_memory: &SharedMemory, outputs: &[xrandr::OutputInfo], name: &str) {
+fn restore_output(shared_memory: &SharedMemory, outputs: &[randr::OutputInfo], name: &str) {
     let output_info = outputs.iter().find(|output| output.name == name);
 
     let (stored_state, workspaces) = {
@@ -262,7 +268,7 @@ fn restore_output(shared_memory: &SharedMemory, outputs: &[xrandr::OutputInfo], 
 }
 
 /// Name of the currently active primary output, if any.
-fn current_primary(outputs: &[xrandr::OutputInfo]) -> Option<String> {
+fn current_primary(outputs: &[randr::OutputInfo]) -> Option<String> {
     outputs
         .iter()
         .find(|output| output.primary && output.active)
