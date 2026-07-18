@@ -251,20 +251,38 @@ fn restore_output(shared_memory: &SharedMemory, outputs: &[randr::OutputInfo], n
         arguments.push("--primary".into());
     }
 
+    let apply_start = std::time::Instant::now();
     if !xrandr::apply(&arguments) {
         return;
     }
+    eprintln!(
+        "i3-awm: {name} xrandr apply {arguments:?} took {}ms",
+        apply_start.elapsed().as_millis()
+    );
 
     // i3 processes the RandR change asynchronously; wait until it sees the
     // output active before moving workspaces onto it (bounded ~2s).
+    let wait_start = std::time::Instant::now();
+    let mut polls = 0;
     for _ in 0..20 {
         if i3::output_active(name) {
             break;
         }
+        polls += 1;
         thread::sleep(Duration::from_millis(100));
     }
+    eprintln!(
+        "i3-awm: {name} i3 saw output active after {}ms ({polls} poll(s))",
+        wait_start.elapsed().as_millis()
+    );
 
+    let move_start = std::time::Instant::now();
     i3::move_workspaces_to_output(&workspaces, name);
+    eprintln!(
+        "i3-awm: {name} moved {} workspace(s) in {}ms",
+        workspaces.len(),
+        move_start.elapsed().as_millis()
+    );
 }
 
 /// Name of the currently active primary output, if any.

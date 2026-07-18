@@ -16,13 +16,15 @@ use x11rb::protocol::randr::{self, ConnectionExt, NotifyMask};
 use x11rb::protocol::xproto::Window;
 use x11rb::rust_connection::RustConnection;
 
-/// After the first event of a burst, wait for this long with no further events
-/// before reconciling, so a plug/unplug (which emits many staggered events, as
-/// does our own `xrandr` apply) collapses into a single reconcile.
-const SETTLE: Duration = Duration::from_millis(250);
-/// Never wait longer than this for a burst to go quiet, so a monitor that keeps
-/// flapping can't stall reconciliation indefinitely.
-const MAX_SETTLE: Duration = Duration::from_millis(2000);
+/// After the first event of a burst, wait this long with no further events
+/// before reconciling, so the simultaneous events of a single plug/unplug
+/// collapse into one reconcile. Kept small: a reconcile is now cheap (a
+/// sub-millisecond RandR read), and `restore` only ever fires once per connect,
+/// so there is no reason to sit through a long debounce before reacting.
+const SETTLE: Duration = Duration::from_millis(80);
+/// Never wait longer than this for a burst to go quiet, so we react promptly
+/// even while a monitor is still emitting negotiation events.
+const MAX_SETTLE: Duration = Duration::from_millis(400);
 
 /// The current state of one output, as read from RandR.
 #[derive(Debug, Clone)]
