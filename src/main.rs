@@ -222,6 +222,12 @@ fn restore_output(shared_memory: &SharedMemory, outputs: &[randr::OutputInfo], n
         (stored_state, workspaces)
     };
 
+    // Capture the focused workspace *before* enabling the output. Enabling it
+    // makes i3 auto-create (and possibly focus) an empty workspace on the new
+    // output; capturing focus afterwards would let us restore focus onto that
+    // phantom and leave it behind as a spurious extra workspace.
+    let focused_before = i3::focused_workspace();
+
     let mut arguments: Vec<String> = vec!["--output".into(), name.into()];
 
     // Mode: stored resolution, else the monitor's preferred (native) mode.
@@ -283,7 +289,7 @@ fn restore_output(shared_memory: &SharedMemory, outputs: &[randr::OutputInfo], n
     );
 
     let move_start = std::time::Instant::now();
-    i3::move_workspaces_to_output(&workspaces, name);
+    i3::move_workspaces_to_output(&workspaces, name, focused_before.as_deref());
     eprintln!(
         "i3-awm: {name} moved {} workspace(s) in {}ms",
         workspaces.len(),

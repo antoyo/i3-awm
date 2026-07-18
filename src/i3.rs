@@ -34,10 +34,25 @@ pub fn output_active(name: &str) -> bool {
     }
 }
 
-/// Move the named workspaces onto `output`, preserving the originally focused
-/// workspace. i3's `move workspace to output` acts on the focused workspace, so
-/// we focus each one in turn, then restore focus.
-pub fn move_workspaces_to_output(workspaces: &[String], output: &str) {
+/// Name of the currently focused workspace, or `None` if i3 is unreachable.
+pub fn focused_workspace() -> Option<String> {
+    let mut connection = I3Connection::connect().ok()?;
+    let reply = connection.get_workspaces().ok()?;
+    reply
+        .workspaces
+        .into_iter()
+        .find(|workspace| workspace.focused)
+        .map(|workspace| workspace.name)
+}
+
+/// Move the named workspaces onto `output`, then focus `restore_focus`.
+///
+/// i3's `move workspace to output` acts on the focused workspace, so we focus
+/// each one in turn. `restore_focus` must be captured by the caller *before*
+/// the output was enabled: enabling an output makes i3 auto-create an empty
+/// workspace on it, and focusing that phantom afterwards would resurrect it as
+/// a spurious extra workspace.
+pub fn move_workspaces_to_output(workspaces: &[String], output: &str, restore_focus: Option<&str>) {
     if workspaces.is_empty() {
         return;
     }
@@ -48,14 +63,6 @@ pub fn move_workspaces_to_output(workspaces: &[String], output: &str) {
             return;
         }
     };
-
-    let focused_workspace = connection.get_workspaces().ok().and_then(|reply| {
-        reply
-            .workspaces
-            .into_iter()
-            .find(|workspace| workspace.focused)
-            .map(|workspace| workspace.name)
-    });
 
     for workspace in workspaces {
         let command = format!(
@@ -68,10 +75,10 @@ pub fn move_workspaces_to_output(workspaces: &[String], output: &str) {
         }
     }
 
-    if let Some(name) = focused_workspace {
+    if let Some(name) = restore_focus {
         let _ = connection.run_command(&format!(
             "workspace --no-auto-back-and-forth \"{}\"",
-            escape(&name)
+            escape(name)
         ));
     }
 }
