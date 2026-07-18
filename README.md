@@ -5,6 +5,8 @@ your [i3](https://i3wm.org/) layout per monitor. When a monitor is unplugged and
 later plugged back in, `i3-awm` puts the workspaces that lived on it back on it,
 and restores that monitor's resolution, position, and primary flag.
 
+> **Note:** Significant portions of this project were designed and implemented with the help of advanced AI systems, blending automated code generation with human review and refinement.
+
 Monitors are identified by their **xrandr output name** (`HDMI-1`, `DP-1`,
 `eDP-1`, …).
 
