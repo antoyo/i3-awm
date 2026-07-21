@@ -68,6 +68,15 @@ impl Memory {
     pub fn get(&self, name: &str) -> Option<&OutputState> {
         self.outputs.get(name)
     }
+
+    /// Mark `name` as the sole primary output, clearing the primary flag from
+    /// every other remembered output so exactly one primary ever exists.
+    pub fn set_primary(&mut self, name: &str) {
+        for (output_name, state) in &mut self.outputs {
+            state.primary = output_name == name;
+        }
+        self.entry(name).primary = true;
+    }
 }
 
 /// `$XDG_STATE_HOME/i3-awm/state.json`, falling back to `~/.local/state`.

@@ -196,6 +196,27 @@ fn reconcile(
         disable_output(output_name);
     }
 
+    // If the output that was primary just disconnected, X is left with its
+    // primary pointing at a gone (or now-disabled) output and no usable primary
+    // remains. Promote one of the surviving connected outputs so the remaining
+    // screen becomes primary.
+    if !newly_disconnected.is_empty() {
+        let active_primary_remains = outputs.iter().any(|output| {
+            output.primary && output.active && currently_connected.contains(&output.name)
+        });
+        if !active_primary_remains
+            && let Some(new_primary) = outputs
+                .iter()
+                .find(|output| output.active && currently_connected.contains(&output.name))
+        {
+            println!(
+                "i3-awm: primary output disconnected; promoting {} to primary",
+                new_primary.name
+            );
+            set_primary(shared_memory, &new_primary.name);
+        }
+    }
+
     *previously_connected = currently_connected;
     shared_memory.lock().unwrap().save();
 }
@@ -205,6 +226,13 @@ fn reconcile(
 /// still occupies desktop space); explicitly disabling it reclaims that space.
 fn disable_output(name: &str) {
     xrandr::apply(&["--output".into(), name.into(), "--off".into()]);
+}
+
+/// Make `name` the primary output in both X and our remembered state, so the
+/// surviving screen keeps a valid primary after the old one was turned off.
+fn set_primary(shared_memory: &SharedMemory, name: &str) {
+    xrandr::apply(&["--output".into(), name.into(), "--primary".into()]);
+    shared_memory.lock().unwrap().set_primary(name);
 }
 
 /// Apply resolution/position/primary for a freshly connected output, wait for
